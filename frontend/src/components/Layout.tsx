@@ -3,6 +3,7 @@ import { LayoutDashboard, Plus, Ticket, Clock, DollarSign, BarChart3, Users, Log
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { cn } from '../lib/utils'
+import { ThemeToggle } from './ThemeToggle'
 
 export type TabType = 'dashboard' | 'risk' | 'ip-analysis' | 'generator' | 'redemptions' | 'history' | 'topups' | 'analytics' | 'model-status' | 'users'
 
@@ -18,6 +19,9 @@ interface LayoutProps {
   activeTab: TabType
   onTabChange: (tab: TabType) => void
   onLogout: () => void
+  theme: 'light' | 'dark'
+  onToggleTheme: () => void
+  themeLoading?: boolean
 }
 
 const tabs: { id: TabType; label: string; icon: typeof LayoutDashboard }[] = [
@@ -33,7 +37,7 @@ const tabs: { id: TabType; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'history', label: '生成记录', icon: Clock },
 ]
 
-export function Layout({ children, activeTab, onTabChange, onLogout }: LayoutProps) {
+export function Layout({ children, activeTab, onTabChange, onLogout, theme, onToggleTheme, themeLoading }: LayoutProps) {
   const [dbStatus, setDbStatus] = useState<DbStatus | null>(null)
   const [indicatorStyle, setIndicatorStyle] = useState({ left: 0, width: 0, opacity: 0 })
   const tabsRef = useRef<(HTMLButtonElement | null)[]>([])
@@ -119,10 +123,13 @@ export function Layout({ children, activeTab, onTabChange, onLogout }: LayoutPro
                   </Badge>
                 )}
               </div>
-              <Button variant="ghost" size="sm" onClick={onLogout} className="text-muted-foreground hover:text-foreground">
-                <LogOut className="h-4 w-4 sm:mr-2" />
-                <span className="hidden sm:inline">退出</span>
-              </Button>
+              <div className="flex items-center gap-1 sm:gap-2">
+                <ThemeToggle theme={theme} onToggle={onToggleTheme} loading={themeLoading} />
+                <Button variant="ghost" size="sm" onClick={onLogout} className="text-muted-foreground hover:text-foreground">
+                  <LogOut className="h-4 w-4 sm:mr-2" />
+                  <span className="hidden sm:inline">退出</span>
+                </Button>
+              </div>
             </div>
           </div>
         </header>

@@ -80,6 +80,10 @@ RECOMMENDED_INDEXES = [
     # Query: WHERE created_at >= x AND type IN (2,5) GROUP BY user_id ORDER BY count DESC
     ("idx_logs_created_type_user", "logs", ["created_at", "type", "user_id"]),
 
+    # 与上游 new-api 的默认索引保持一致
+    ("idx_type_created", "logs", ["type", "created_at"]),
+    ("idx_user_created", "logs", ["user_id", "created_at"]),
+
     # === 高优先级：大窗口/稳定性补充（避免 3d/7d 走全表扫描）===
     # 对于部分数据库/数据分布，type 放前面会更容易命中索引
     ("idx_logs_type_created_user", "logs", ["type", "created_at", "user_id"]),

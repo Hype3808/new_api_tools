@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Login, Layout, TabType, Generator, History, TopUps, Dashboard, Redemptions, Analytics, UserManagement, RealtimeRanking, IPAnalysis, ModelStatusMonitor } from './components'
 import { useAuth } from './contexts/AuthContext'
 import { WarmupScreen } from './components/WarmupScreen'
+import { useTheme } from './services/usePreferences'
 
 // Valid tabs
 const validTabs: TabType[] = ['dashboard', 'topups', 'risk', 'ip-analysis', 'analytics', 'model-status', 'users', 'generator', 'redemptions', 'history']
@@ -30,10 +31,22 @@ const getInitialTab = (): TabType => {
 
 function App() {
   const { isAuthenticated, token, login, logout } = useAuth()
+  const [theme, setTheme, themeLoading] = useTheme()
   const [activeTab, setActiveTab] = useState<TabType>(getInitialTab)
   const [warmupState, setWarmupState] = useState<'checking' | 'warming' | 'ready'>('checking')
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
+
+  // Apply theme to document root
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'dark') {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+    localStorage.setItem('theme', theme)
+  }, [theme])
 
   // 检查后端预热状态
   useEffect(() => {
@@ -98,6 +111,15 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
+  const toggleTheme = useCallback(async () => {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    try {
+      await setTheme(next)
+    } catch (error) {
+      console.error('Failed to update theme', error)
+    }
+  }, [theme, setTheme])
+
   const handleWarmupReady = () => {
     setWarmupState('ready')
   }
@@ -153,7 +175,14 @@ function App() {
   }
 
   return (
-    <Layout activeTab={activeTab} onTabChange={setActiveTab} onLogout={logout}>
+    <Layout
+      activeTab={activeTab}
+      onTabChange={setActiveTab}
+      onLogout={logout}
+      theme={theme === 'dark' ? 'dark' : 'light'}
+      onToggleTheme={toggleTheme}
+      themeLoading={themeLoading}
+    >
       {renderContent()}
     </Layout>
   )

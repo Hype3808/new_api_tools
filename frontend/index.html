@@ -1,10 +1,26 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/tool.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NewAPI Middleware Tool</title>
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem('theme')
+          const shouldUseDark = saved ? saved === 'dark' : true
+          const root = document.documentElement
+          if (shouldUseDark) {
+            root.classList.add('dark')
+          } else {
+            root.classList.remove('dark')
+          }
+        } catch (error) {
+          document.documentElement.classList.add('dark')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

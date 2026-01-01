@@ -76,7 +76,7 @@ export const DEFAULT_PREFERENCES = {
   [PREFERENCE_KEYS.DEFAULT_EXPIRE_MODE]: 'never' as const,
   [PREFERENCE_KEYS.DASHBOARD_PERIOD]: '7d' as const,
   [PREFERENCE_KEYS.TOPUPS_PAGE_SIZE]: 20,
-  [PREFERENCE_KEYS.THEME]: 'light' as const,
+  [PREFERENCE_KEYS.THEME]: 'dark' as const,
   [PREFERENCE_KEYS.SIDEBAR_COLLAPSED]: false,
 }
 
@@ -98,7 +98,7 @@ export function useDashboardPeriod() {
 }
 
 export function useTheme() {
-  return usePreference(
+  return usePreference<'light' | 'dark'>(
     PREFERENCE_KEYS.THEME,
     DEFAULT_PREFERENCES[PREFERENCE_KEYS.THEME]
   )
