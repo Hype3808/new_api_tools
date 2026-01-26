@@ -133,6 +133,7 @@ interface UserInfo {
   group: string | null
   last_request_time: number | null
   activity_level: string
+  linux_do_id: string | null
 }
 
 export function UserManagement() {
@@ -153,6 +154,10 @@ export function UserManagement() {
   const [deletingVeryInactive, setDeletingVeryInactive] = useState(false)
   const [deletingNever, setDeletingNever] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  
+  // 软删除用户清理
+  const [softDeletedCount, setSoftDeletedCount] = useState(0)
+  const [purgingSoftDeleted, setPurgingSoftDeleted] = useState(false)
 
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean
@@ -163,6 +168,8 @@ export function UserManagement() {
     details?: { count: number; users: string[] }
     loading?: boolean
     activityLevel?: string
+    hardDelete?: boolean
+    requireConfirmText?: boolean
   }>({
     isOpen: false,
     title: '',
@@ -170,6 +177,9 @@ export function UserManagement() {
     type: 'warning',
     onConfirm: () => { },
   })
+
+  // 彻底删除确认输入
+  const [hardDeleteConfirmText, setHardDeleteConfirmText] = useState('')
 
   // 用户分析弹窗状态
   const [analysisDialogOpen, setAnalysisDialogOpen] = useState(false)
@@ -195,17 +205,109 @@ export function UserManagement() {
     'Authorization': `Bearer ${token}`,
   }), [token])
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (quick = false) => {
     try {
-      const response = await fetch(`${apiUrl}/api/users/stats`, { headers: getAuthHeaders() })
+      const params = quick ? '?quick=true' : ''
+      const response = await fetch(`${apiUrl}/api/users/stats${params}`, { headers: getAuthHeaders() })
       const data = await response.json()
       if (data.success) {
         setStats(data.data)
+        // 如果是快速模式且活跃度数据为0，异步加载完整数据
+        if (quick && data.data.active_users === 0 && data.data.inactive_users === 0 && data.data.very_inactive_users === 0) {
+          // 延迟加载完整统计，不阻塞用户列表
+          setTimeout(() => fetchStats(false), 100)
+        }
       }
     } catch (error) {
       console.error('Failed to fetch stats:', error)
     }
   }, [apiUrl, getAuthHeaders])
+
+  // 获取软删除用户数量
+  const fetchSoftDeletedCount = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiUrl}/api/users/soft-deleted/count`, { headers: getAuthHeaders() })
+      const data = await response.json()
+      if (data.success) {
+        setSoftDeletedCount(data.data?.count || 0)
+      }
+    } catch (error) {
+      console.error('Failed to fetch soft deleted count:', error)
+    }
+  }, [apiUrl, getAuthHeaders])
+
+  // 预览清理软删除用户
+  const previewPurgeSoftDeleted = async () => {
+    setHardDeleteConfirmText('')
+    setConfirmDialog({
+      isOpen: true,
+      title: '清理已软删除用户',
+      message: '正在查询已软删除的用户...',
+      type: 'danger',
+      loading: true,
+      hardDelete: true,
+      requireConfirmText: true,
+      onConfirm: () => executePurgeSoftDeleted(),
+    })
+
+    try {
+      const response = await fetch(`${apiUrl}/api/users/soft-deleted/purge`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ dry_run: true }),
+      })
+      const data = await response.json()
+      if (data.success && data.data) {
+        const count = data.data.count
+        const usernames = data.data.users || []
+        if (count === 0) {
+          setConfirmDialog(prev => ({ ...prev, isOpen: false }))
+          showToast('info', '没有需要清理的软删除用户')
+          return
+        }
+        setConfirmDialog(prev => ({
+          ...prev,
+          message: `确定要彻底清理 ${count} 个已软删除的用户吗？\n\n⚠️ 这些用户之前已被软删除，此操作将永久移除他们及所有关联数据，不可恢复！`,
+          details: { count, users: usernames },
+          loading: false,
+        }))
+      } else {
+        setConfirmDialog(prev => ({ ...prev, isOpen: false }))
+        showToast('error', data.message || '预览失败')
+      }
+    } catch (error) {
+      console.error('Failed to preview purge:', error)
+      setConfirmDialog(prev => ({ ...prev, isOpen: false }))
+      showToast('error', '预览失败')
+    }
+  }
+
+  // 执行清理软删除用户
+  const executePurgeSoftDeleted = async () => {
+    setConfirmDialog(prev => ({ ...prev, isOpen: false }))
+    setPurgingSoftDeleted(true)
+    try {
+      const response = await fetch(`${apiUrl}/api/users/soft-deleted/purge`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ dry_run: false }),
+      })
+      const data = await response.json()
+      if (data.success) {
+        showToast('success', data.message)
+        setSoftDeletedCount(0)
+        // 刷新统计
+        fetchStats()
+      } else {
+        showToast('error', data.message || '清理失败')
+      }
+    } catch (error) {
+      console.error('Failed to purge soft deleted:', error)
+      showToast('error', '清理失败')
+    } finally {
+      setPurgingSoftDeleted(false)
+    }
+  }
 
   const fetchUsers = useCallback(async () => {
     setLoading(true)
@@ -252,69 +354,95 @@ export function UserManagement() {
     }
   }, [apiUrl, getAuthHeaders, showToast])
 
+  // 单个用户删除状态
+  const [deleteUserTarget, setDeleteUserTarget] = useState<{ userId: number; username: string; activityLevel: string } | null>(null)
+  const [deleteMode, setDeleteMode] = useState<'soft' | 'hard'>('soft')
+
   const deleteUser = async (userId: number, username: string) => {
     const userToDelete = users.find(u => u.id === userId)
+    setDeleteUserTarget({ userId, username, activityLevel: userToDelete?.activity_level || '' })
+    setDeleteMode('soft')
+    setHardDeleteConfirmText('')
     setConfirmDialog({
       isOpen: true,
       title: '删除用户',
-      message: `确定要删除用户 "${username}" 吗？此操作会同时删除该用户的所有 Token。`,
+      message: `请选择删除方式：`,
       type: 'danger',
-      onConfirm: async () => {
-        setConfirmDialog(prev => ({ ...prev, isOpen: false }))
-        setDeleting(true)
-        try {
-          const response = await fetch(`${apiUrl}/api/users/${userId}`, {
-            method: 'DELETE',
-            headers: getAuthHeaders(),
-          })
-          const data = await response.json()
-          if (data.success) {
-            showToast('success', data.message)
-            // 直接从本地状态移除用户，避免重新加载
-            setUsers(prev => prev.filter(u => u.id !== userId))
-            setTotal(prev => prev - 1)
-            // 更新统计数据（本地计算）
-            if (stats && userToDelete) {
-              const level = userToDelete.activity_level
-              setStats(prev => prev ? {
-                ...prev,
-                total_users: prev.total_users - 1,
-                active_users: level === 'active' ? prev.active_users - 1 : prev.active_users,
-                inactive_users: level === 'inactive' ? prev.inactive_users - 1 : prev.inactive_users,
-                very_inactive_users: level === 'very_inactive' ? prev.very_inactive_users - 1 : prev.very_inactive_users,
-                never_requested: level === 'never' ? prev.never_requested - 1 : prev.never_requested,
-              } : null)
-            }
-          } else {
-            showToast('error', data.message || '删除失败')
-          }
-        } catch (error) {
-          console.error('Failed to delete user:', error)
-          showToast('error', '删除用户失败')
-        } finally {
-          setDeleting(false)
-        }
-      },
+      onConfirm: () => {}, // 占位，实际执行在按钮的 onClick 中处理
     })
   }
 
-  const previewBatchDelete = async (level: string) => {
+  const executeDeleteUser = async () => {
+    if (!deleteUserTarget) return
+    
+    const { userId, activityLevel } = deleteUserTarget
+    const hardDelete = deleteMode === 'hard'
+    
+    setConfirmDialog(prev => ({ ...prev, isOpen: false }))
+    setDeleting(true)
+    try {
+      const response = await fetch(`${apiUrl}/api/users/${userId}?hard_delete=${hardDelete}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      })
+      const data = await response.json()
+      if (data.success) {
+        showToast('success', data.message)
+        // 直接从本地状态移除用户，避免重新加载
+        setUsers(prev => prev.filter(u => u.id !== userId))
+        setTotal(prev => prev - 1)
+        // 更新统计数据（本地计算）
+        if (stats) {
+          setStats(prev => prev ? {
+            ...prev,
+            total_users: prev.total_users - 1,
+            active_users: activityLevel === 'active' ? prev.active_users - 1 : prev.active_users,
+            inactive_users: activityLevel === 'inactive' ? prev.inactive_users - 1 : prev.inactive_users,
+            very_inactive_users: activityLevel === 'very_inactive' ? prev.very_inactive_users - 1 : prev.very_inactive_users,
+            never_requested: activityLevel === 'never' ? prev.never_requested - 1 : prev.never_requested,
+          } : null)
+        }
+        // 如果是软删除，更新软删除计数
+        if (!hardDelete) {
+          fetchSoftDeletedCount()
+        }
+      } else {
+        showToast('error', data.message || '删除失败')
+      }
+    } catch (error) {
+      console.error('Failed to delete user:', error)
+      showToast('error', '删除用户失败')
+    } finally {
+      setDeleting(false)
+      setDeleteUserTarget(null)
+    }
+  }
+
+  const previewBatchDelete = async (level: string, hardDelete: boolean = false) => {
+    // 重置确认输入
+    setHardDeleteConfirmText('')
+    
+    const levelLabel = level === 'never' ? '从未请求' : level === 'inactive' ? '不活跃' : '非常不活跃'
+    const actionLabel = hardDelete ? '彻底删除' : '删除'
+    
     // 先立即显示弹窗，带加载状态
     setConfirmDialog({
       isOpen: true,
-      title: '批量删除用户',
-      message: `正在查询${level === 'never' ? '从未请求' : '非常不活跃'}的用户...`,
+      title: `批量${actionLabel}用户`,
+      message: `正在查询${levelLabel}的用户...`,
       type: 'danger',
       loading: true,
       activityLevel: level,
-      onConfirm: () => executeBatchDelete(level),
+      hardDelete,
+      requireConfirmText: hardDelete,
+      onConfirm: () => executeBatchDelete(level, hardDelete),
     })
 
     try {
       const response = await fetch(`${apiUrl}/api/users/batch-delete`, {
         method: 'POST',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ activity_level: level, dry_run: true }),
+        body: JSON.stringify({ activity_level: level, dry_run: true, hard_delete: hardDelete }),
       })
       const data = await response.json()
       if (data.success && data.data) {
@@ -326,9 +454,12 @@ export function UserManagement() {
           return
         }
         // 更新弹窗内容
+        const warningText = hardDelete 
+          ? `⚠️ 彻底删除将永久移除用户及所有关联数据（令牌、配额、任务等），此操作不可恢复！`
+          : `此操作为软删除，数据可通过数据库恢复。`
         setConfirmDialog(prev => ({
           ...prev,
-          message: `确定要删除 ${count} 个${level === 'never' ? '从未请求' : '非常不活跃'}的用户吗？此操作不可恢复。`,
+          message: `确定要${actionLabel} ${count} 个${levelLabel}的用户吗？\n\n${warningText}`,
           details: { count, users: usernames },
           loading: false,
         }))
@@ -343,7 +474,7 @@ export function UserManagement() {
     }
   }
 
-  const executeBatchDelete = async (level: string) => {
+  const executeBatchDelete = async (level: string, hardDelete: boolean = false) => {
     setConfirmDialog(prev => ({ ...prev, isOpen: false }))
     const setLoading = level === 'very_inactive' ? setDeletingVeryInactive : setDeletingNever
     setLoading(true)
@@ -351,7 +482,7 @@ export function UserManagement() {
       const response = await fetch(`${apiUrl}/api/users/batch-delete`, {
         method: 'POST',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ activity_level: level, dry_run: false }),
+        body: JSON.stringify({ activity_level: level, dry_run: false, hard_delete: hardDelete }),
       })
       const data = await response.json()
       if (data.success) {
@@ -359,6 +490,10 @@ export function UserManagement() {
         // 并行刷新数据
         setPage(1)
         Promise.all([fetchUsers(), fetchStats()])
+        // 如果是软删除，刷新软删除计数
+        if (!hardDelete) {
+          fetchSoftDeletedCount()
+        }
       } else {
         showToast('error', data.message || '批量删除失败')
       }
@@ -380,8 +515,9 @@ export function UserManagement() {
   }
 
   useEffect(() => {
-    fetchStats()
-  }, [fetchStats])
+    fetchStats(true)  // 首次加载使用快速模式
+    fetchSoftDeletedCount()  // 获取软删除用户数量
+  }, [fetchStats, fetchSoftDeletedCount])
 
   useEffect(() => {
     fetchUsers()
@@ -536,7 +672,7 @@ export function UserManagement() {
         <StatCard
           title="活跃用户"
           value={stats?.active_users || 0}
-          subValue="7天内有请求"
+          subValue={stats?.active_users === 0 && stats?.inactive_users === 0 && stats?.very_inactive_users === 0 && (stats?.never_requested || 0) > 0 ? "计算中..." : "7天内有请求"}
           icon={UserCheck}
           color="green"
           onClick={() => { setActivityFilter('active'); setPage(1) }}
@@ -545,7 +681,7 @@ export function UserManagement() {
         <StatCard
           title="不活跃用户"
           value={stats?.inactive_users || 0}
-          subValue="7-30天内有请求"
+          subValue={stats?.active_users === 0 && stats?.inactive_users === 0 && stats?.very_inactive_users === 0 && (stats?.never_requested || 0) > 0 ? "计算中..." : "7-30天内有请求"}
           icon={Clock}
           color="yellow"
           onClick={() => { setActivityFilter('inactive'); setPage(1) }}
@@ -554,7 +690,7 @@ export function UserManagement() {
         <StatCard
           title="非常不活跃"
           value={stats?.very_inactive_users || 0}
-          subValue="超过30天无请求"
+          subValue={stats?.active_users === 0 && stats?.inactive_users === 0 && stats?.very_inactive_users === 0 && (stats?.never_requested || 0) > 0 ? "计算中..." : "超过30天无请求"}
           icon={UserX}
           color="red"
           onClick={() => { setActivityFilter('very_inactive'); setPage(1) }}
@@ -574,36 +710,102 @@ export function UserManagement() {
       {/* Batch Delete Actions */}
       <Card className="border-orange-200 bg-orange-50 dark:bg-orange-950/20 dark:border-orange-900">
         <CardContent className="p-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-orange-100 dark:bg-orange-900 rounded-lg">
-                <AlertTriangle className="h-5 w-5 text-orange-600 dark:text-orange-400" />
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-orange-100 dark:bg-orange-900 rounded-lg">
+                  <AlertTriangle className="h-5 w-5 text-orange-600 dark:text-orange-400" />
+                </div>
+                <div>
+                  <h3 className="font-medium text-orange-800 dark:text-orange-200">批量注销不活跃用户</h3>
+                  <p className="text-sm text-orange-600 dark:text-orange-400">注销：数据保留可恢复 | 彻底删除：永久移除不可恢复</p>
+                </div>
               </div>
-              <div>
-                <h3 className="font-medium text-orange-800 dark:text-orange-200">批量清理不活跃用户</h3>
-                <p className="text-sm text-orange-600 dark:text-orange-400">删除后不可恢复，请谨慎操作</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-orange-300 text-orange-700 hover:bg-orange-100 hover:text-orange-800 dark:border-orange-800 dark:text-orange-300 dark:hover:bg-orange-900"
+                  onClick={() => previewBatchDelete('very_inactive', false)}
+                  disabled={deletingVeryInactive || !stats?.very_inactive_users}
+                >
+                  {deletingVeryInactive ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                  注销非常不活跃 ({stats?.very_inactive_users || 0})
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-gray-300 text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                  onClick={() => previewBatchDelete('never', false)}
+                  disabled={deletingNever || !stats?.never_requested}
+                >
+                  {deletingNever ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                  注销从未请求 ({stats?.never_requested || 0})
+                </Button>
               </div>
             </div>
-            <div className="flex gap-3">
-              <Button
-                variant="outline"
-                className="border-orange-300 text-orange-700 hover:bg-orange-100 hover:text-orange-800 dark:border-orange-800 dark:text-orange-300 dark:hover:bg-orange-900"
-                onClick={() => previewBatchDelete('very_inactive')}
-                disabled={deletingVeryInactive || !stats?.very_inactive_users}
-              >
-                {deletingVeryInactive ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
-                清理非常不活跃 ({stats?.very_inactive_users || 0})
-              </Button>
-              <Button
-                variant="outline"
-                className="border-gray-300 text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
-                onClick={() => previewBatchDelete('never')}
-                disabled={deletingNever || !stats?.never_requested}
-              >
-                {deletingNever ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
-                清理从未请求 ({stats?.never_requested || 0})
-              </Button>
+            {/* 彻底删除区域 */}
+            <div className="border-t border-orange-200 dark:border-orange-800 pt-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-red-100 dark:bg-red-900 rounded-lg">
+                    <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-red-800 dark:text-red-200">彻底删除（危险操作）</h3>
+                    <p className="text-sm text-red-600 dark:text-red-400">永久删除用户及所有关联数据，包括令牌、配额、任务等</p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-red-300 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900"
+                    onClick={() => previewBatchDelete('very_inactive', true)}
+                    disabled={deletingVeryInactive || !stats?.very_inactive_users}
+                  >
+                    {deletingVeryInactive ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                    彻底删除非常不活跃
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-red-300 text-red-700 hover:bg-red-100 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900"
+                    onClick={() => previewBatchDelete('never', true)}
+                    disabled={deletingNever || !stats?.never_requested}
+                  >
+                    {deletingNever ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                    彻底删除从未请求
+                  </Button>
+                </div>
+              </div>
             </div>
+            {/* 清理已注销用户 */}
+            {softDeletedCount > 0 && (
+              <div className="border-t border-orange-200 dark:border-orange-800 pt-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-purple-100 dark:bg-purple-900 rounded-lg">
+                      <Trash2 className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-medium text-purple-800 dark:text-purple-200">清理已注销用户</h3>
+                      <p className="text-sm text-purple-600 dark:text-purple-400">这些用户已被删除（注销），彻底清理可释放数据库空间</p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-purple-300 text-purple-700 hover:bg-purple-100 hover:text-purple-800 dark:border-purple-800 dark:text-purple-300 dark:hover:bg-purple-900"
+                    onClick={previewPurgeSoftDeleted}
+                    disabled={purgingSoftDeleted}
+                  >
+                    {purgingSoftDeleted ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                    彻底清理注销用户 ({softDeletedCount})
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -630,7 +832,7 @@ export function UserManagement() {
               <div className="relative flex-1 max-w-sm">
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
-                  placeholder="搜索用户名或邮箱..."
+                  placeholder="搜索用户名/邮箱/LinuxDoID/邀请码..."
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   onKeyPress={handleKeyPress}
@@ -664,6 +866,7 @@ export function UserManagement() {
                     <TableHead>用户</TableHead>
                     <TableHead className="hidden sm:table-cell">角色</TableHead>
                     <TableHead>状态</TableHead>
+                    <TableHead className="hidden lg:table-cell">Linux.do</TableHead>
                     <TableHead className="text-right">额度 (USD)</TableHead>
                     <TableHead className="text-right hidden sm:table-cell">已用</TableHead>
                     <TableHead className="text-right hidden md:table-cell">请求数</TableHead>
@@ -695,6 +898,21 @@ export function UserManagement() {
                         {getRoleBadge(user.role)}
                       </TableCell>
                       <TableCell>{getStatusBadge(user.status)}</TableCell>
+                      <TableCell className="hidden lg:table-cell">
+                        {user.linux_do_id ? (
+                          <a
+                            href={`https://linux.do/discobot/certificate.svg?date=Jan+29+2024&type=advanced&user_id=${user.linux_do_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs font-mono text-blue-500 hover:text-blue-600 hover:underline"
+                            title="查看 Linux.do 证书"
+                          >
+                            {user.linux_do_id}
+                          </a>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-mono text-sm font-bold text-primary tabular-nums tracking-tight">
                         {formatQuota(user.quota)}
                       </TableCell>
@@ -782,41 +1000,114 @@ export function UserManagement() {
       </Card>
 
       {/* Confirm Dialog */}
-      <Dialog open={confirmDialog.isOpen} onOpenChange={(open: boolean) => setConfirmDialog(prev => ({ ...prev, isOpen: open }))}>
+      <Dialog open={confirmDialog.isOpen} onOpenChange={(open: boolean) => { setConfirmDialog(prev => ({ ...prev, isOpen: open })); if (!open) { setHardDeleteConfirmText(''); setDeleteUserTarget(null) } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{confirmDialog.title}</DialogTitle>
-            <DialogDescription>{confirmDialog.message}</DialogDescription>
+            <DialogTitle className={confirmDialog.hardDelete || deleteMode === 'hard' ? "text-red-600 dark:text-red-400" : ""}>{confirmDialog.title}</DialogTitle>
+            <DialogDescription className="whitespace-pre-line">{confirmDialog.message}</DialogDescription>
           </DialogHeader>
           {confirmDialog.loading ? (
             <div className="py-8 flex flex-col items-center justify-center">
               <Loader2 className="h-8 w-8 animate-spin text-primary mb-3" />
               <p className="text-sm text-muted-foreground">正在查询用户数据，您也可以直接删除...</p>
             </div>
+          ) : deleteUserTarget ? (
+            /* 单个用户删除 - 显示模式选择 */
+            <div className="py-4 space-y-4">
+              <div className="text-sm text-muted-foreground">
+                用户: <span className="font-medium text-foreground">{deleteUserTarget.username}</span>
+              </div>
+              <div className="space-y-3">
+                <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${deleteMode === 'soft' ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}`}>
+                  <input
+                    type="radio"
+                    name="deleteMode"
+                    checked={deleteMode === 'soft'}
+                    onChange={() => setDeleteMode('soft')}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="font-medium">注销用户</div>
+                    <div className="text-sm text-muted-foreground">数据保留，可通过数据库恢复。用户名仍被占用。</div>
+                  </div>
+                </label>
+                <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${deleteMode === 'hard' ? 'border-red-500 bg-red-50 dark:bg-red-950/20' : 'border-border hover:border-red-300'}`}>
+                  <input
+                    type="radio"
+                    name="deleteMode"
+                    checked={deleteMode === 'hard'}
+                    onChange={() => setDeleteMode('hard')}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="font-medium text-red-600 dark:text-red-400">彻底删除</div>
+                    <div className="text-sm text-muted-foreground">永久删除用户及所有关联数据（令牌、配额等），不可恢复！</div>
+                  </div>
+                </label>
+              </div>
+              {/* 彻底删除需要输入确认 */}
+              {deleteMode === 'hard' && (
+                <div className="border-t pt-4">
+                  <p className="text-sm font-medium text-red-600 dark:text-red-400 mb-2">
+                    请输入 <span className="font-mono bg-red-100 dark:bg-red-900 px-2 py-0.5 rounded">彻底删除</span> 以确认操作：
+                  </p>
+                  <Input
+                    value={hardDeleteConfirmText}
+                    onChange={(e) => setHardDeleteConfirmText(e.target.value)}
+                    placeholder="请输入 彻底删除"
+                    className="border-red-300 focus:border-red-500 focus:ring-red-500"
+                  />
+                </div>
+              )}
+            </div>
           ) : confirmDialog.details && (
-            <div className="py-4">
-              <p className="text-sm text-muted-foreground mb-2">将删除以下用户（显示前20个）：</p>
-              <div className="max-h-40 overflow-y-auto bg-muted rounded-md p-3">
-                <div className="flex flex-wrap gap-2">
-                  {confirmDialog.details.users.map((username, i) => (
-                    <Badge key={i} variant="outline">{username}</Badge>
-                  ))}
-                  {confirmDialog.details.count > 20 && (
-                    <Badge variant="secondary">+{confirmDialog.details.count - 20} 更多</Badge>
-                  )}
+            /* 批量删除 - 显示用户列表 */
+            <div className="py-4 space-y-4">
+              <div>
+                <p className="text-sm text-muted-foreground mb-2">将{confirmDialog.hardDelete ? '彻底' : ''}删除以下用户（显示前20个）：</p>
+                <div className="max-h-40 overflow-y-auto bg-muted rounded-md p-3">
+                  <div className="flex flex-wrap gap-2">
+                    {confirmDialog.details.users.map((username, i) => (
+                      <Badge key={i} variant="outline">{username}</Badge>
+                    ))}
+                    {confirmDialog.details.count > 20 && (
+                      <Badge variant="secondary">+{confirmDialog.details.count - 20} 更多</Badge>
+                    )}
+                  </div>
                 </div>
               </div>
+              {/* 彻底删除需要输入确认 */}
+              {confirmDialog.requireConfirmText && (
+                <div className="border-t pt-4">
+                  <p className="text-sm font-medium text-red-600 dark:text-red-400 mb-2">
+                    请输入 <span className="font-mono bg-red-100 dark:bg-red-900 px-2 py-0.5 rounded">彻底删除</span> 以确认操作：
+                  </p>
+                  <Input
+                    value={hardDeleteConfirmText}
+                    onChange={(e) => setHardDeleteConfirmText(e.target.value)}
+                    placeholder="请输入 彻底删除"
+                    className="border-red-300 focus:border-red-500 focus:ring-red-500"
+                  />
+                </div>
+              )}
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}>
+            <Button variant="outline" onClick={() => { setConfirmDialog(prev => ({ ...prev, isOpen: false })); setHardDeleteConfirmText(''); setDeleteUserTarget(null) }}>
               取消
             </Button>
             <Button
-              variant={confirmDialog.type === 'danger' ? 'destructive' : 'default'}
-              onClick={confirmDialog.onConfirm}
+              variant={confirmDialog.type === 'danger' || deleteMode === 'hard' ? 'destructive' : 'default'}
+              onClick={() => {
+                if (deleteUserTarget) {
+                  executeDeleteUser()
+                } else {
+                  confirmDialog.onConfirm()
+                }
+              }}
+              disabled={((confirmDialog.requireConfirmText ?? false) || (deleteUserTarget !== null && deleteMode === 'hard')) && hardDeleteConfirmText !== '彻底删除'}
             >
-              确定删除
+              {deleteUserTarget ? (deleteMode === 'hard' ? '确认彻底删除' : '确认注销') : (confirmDialog.hardDelete ? '确认彻底删除' : '确定删除')}
             </Button>
           </DialogFooter>
         </DialogContent>
